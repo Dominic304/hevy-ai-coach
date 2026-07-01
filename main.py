@@ -1,11 +1,12 @@
 import streamlit as st
 import requests
+import pandas as pd
 from datetime import datetime, timedelta
 from openai import OpenAI
 
 # --- 1.Page config ---
 st.set_page_config(page_title="Hevy AI Coach", layout="wide")
-st.title("Hevy AI Workout Analyzer")
+st.title("Hevy AI Workout Analyzer & Visualizer")
 st.write("Provide your API keys and fetch your data to get personalized programming advice.")
 
 # --- 2.User interface ---
@@ -15,6 +16,19 @@ with st.sidebar:
     openrouter_api_key = st.text_input("OpenRouter / AI API Key", type="password")
     months_to_analyze = st.slider("Months of Data to Analyze", 1, 24, 3)
     user_goal = st.text_area("What is your current main goal? (e.g., Hypertrophy, fix bench plateau)")
+
+    st.header("🤖 Customize Coach Prompt")
+    # This text area loads the default base prompt, but allows you to completely edit it live
+    custom_system_prompt = st.text_area(
+        "Edit Coach Rules:",
+        value=(
+            "You are an elite strength and conditioning coach.\n"
+            "Analyze the following workout history. Identify volume imbalances, "
+            "track progressive overload consistency, and provide exactly 3 specific, "
+            "actionable programming modifications tailored to the user's goals."
+        ),
+        height=150
+    )
 
 # --- 3.Data,parsing ---
 def fetch_and_clean_hevy_data(api_key, months):
@@ -46,7 +60,6 @@ def fetch_and_clean_hevy_data(api_key, months):
             
         data = response.json()
         workouts = data.get("workouts", [])
-        
         
         page_count = data.get("page_count", 1)
         
@@ -107,25 +120,57 @@ if st.button("Analyze My Training", type="primary"):
         if workout_data:
             st.success(f"Successfully loaded {len(workout_data)} workouts from the last {months_to_analyze} months.")
             
+            # --- 5. Data visualization engine ---
+            st.markdown("## 📊 Your Training Metrics")
+            
+            # Flatten the nested workout details into a list for pandas calculation
+            chart_records = []
+            for w in workout_data:
+                total_workout_volume = 0
+                for ex in w["exercises"]:
+                    for s in ex["sets"]:
+                        # Safely fallback to 0 if Hevy returns null for bodyweight exercises
+                        weight = s.get("weight") or 0
+                        reps = s.get("reps") or 0
+                        total_workout_volume += (weight * reps)
+                
+                chart_records.append({
+                    "Date": pd.to_datetime(w["date"]),
+                    "Volume (kg)": total_workout_volume,
+                    "Workouts": 1
+                })
+            
+            df = pd.DataFrame(chart_records)
+            
+            if not df.empty:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Total Session Volume Over Time")
+                    df_sorted = df.sort_values("Date")
+                    st.line_chart(data=df_sorted, x="Date", y="Volume (kg)")
+                    
+                with col2:
+                    st.subheader("Workout Frequency (Weekly Count)")
+                    df_weekly = df.resample('W', on='Date').sum().reset_index()
+                    st.bar_chart(data=df_weekly, x="Date", y="Workouts")
+            
+            # --- 6. AI Analysis Engine ---
             with st.spinner("Analyzing your programming..."):
                 # Configure OpenAI client to point to OpenRouter
                 client = OpenAI(
                     base_url="https://openrouter.ai/api/v1",
-                    api_key=openrouter_api_key, # (You can rename this variable in your UI later, but paste your OpenRouter key here)
+                    api_key=openrouter_api_key,
                 )
                 
-                # Construct the System Prompt
+                # Construct the combined prompt using your editable base prompt
                 prompt = f"""
-                You are an elite strength and conditioning coach. 
-                The user's primary goal is: {user_goal}
+                User's Primary Training Goal: {user_goal}
                 
-                Below is their parsed workout data for the last {months_to_analyze} months. 
-                Analyze their frequency, exercise selection, and progressive overload.
+                Coach Analysis Guidelines:
+                {custom_system_prompt}
                 
-                Provide:
-                1. A summary of what they are doing well.
-                2. Identification of any plateaus or volume imbalances.
-                3. 3 specific, actionable changes to their routine to hit their goal.
+                Below is their parsed workout history for the last {months_to_analyze} months.
                 
                 Data:
                 {workout_data}
