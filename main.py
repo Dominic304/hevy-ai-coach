@@ -1,0 +1,144 @@
+import streamlit as st
+import requests
+from datetime import datetime, timedelta
+from openai import OpenAI
+
+# --- 1.Page config ---
+st.set_page_config(page_title="Hevy AI Coach", layout="wide")
+st.title("Hevy AI Workout Analyzer")
+st.write("Provide your API keys and fetch your data to get personalized programming advice.")
+
+# --- 2.User interface ---
+with st.sidebar:
+    st.header("Configuration")
+    hevy_api_key = st.text_input("Hevy API Key", type="password", help="Get this from hevy.com/settings?developer")
+    openrouter_api_key = st.text_input("OpenRouter / AI API Key", type="password")
+    months_to_analyze = st.slider("Months of Data to Analyze", 1, 24, 3)
+    user_goal = st.text_area("What is your current main goal? (e.g., Hypertrophy, fix bench plateau)")
+
+# --- 3.Data,parsing ---
+def fetch_and_clean_hevy_data(api_key, months):
+    """Fetches paginated workouts from Hevy and strips out unnecessary metadata."""
+    
+    headers = {"api-key": api_key.strip()}
+    base_url = "https://api.hevyapp.com/v1/workouts"
+    
+    cutoff_date = datetime.now() - timedelta(days=30 * months)
+    
+    all_workouts = []
+    page = 1
+    
+    while True:
+        params = {
+            "page": page,
+            "pageSize": 10 
+        }
+        
+        response = requests.get(base_url, headers=headers, params=params)
+        
+        # If 404 on a page AFTER page 1 >= finished fetching all available data
+        if response.status_code == 404 and page > 1:
+            break
+            
+        if response.status_code != 200:
+            st.error(f"Hevy API Error: {response.status_code} - {response.text}")
+            return None
+            
+        data = response.json()
+        workouts = data.get("workouts", [])
+        
+        
+        page_count = data.get("page_count", 1)
+        
+        if not workouts:
+            break
+            
+        reached_cutoff = False
+        for workout in workouts:
+            workout_date_str = workout.get("start_time", workout.get("created_at"))
+            if not workout_date_str:
+                continue
+                
+            workout_date = datetime.fromisoformat(workout_date_str.replace('Z', '+00:00'))
+            
+            if workout_date.replace(tzinfo=None) < cutoff_date:
+                reached_cutoff = True
+                break
+                
+            # Clean data
+            cleaned_workout = {
+                "date": workout_date.strftime("%Y-%m-%d"),
+                "name": workout.get("name", "Workout"),
+                "exercises": []
+            }
+            
+            for exercise in workout.get("exercises", []):
+                ex_data = {
+                    "title": exercise.get("title", "Unknown Exercise"),
+                    "sets": []
+                }
+                for s in exercise.get("sets", []):
+                    ex_data["sets"].append({
+                        "weight": s.get("weight_kg", 0),
+                        "reps": s.get("reps", 0),
+                    })
+                cleaned_workout["exercises"].append(ex_data)
+                
+            all_workouts.append(cleaned_workout)
+            
+        # Stop fetching if we reached the date limit OR if we are on your last available page
+        if reached_cutoff or page >= page_count:
+            break
+            
+        page += 1
+        
+    return all_workouts
+
+# --- 4.Feeding data to AI---
+if st.button("Analyze My Training", type="primary"):
+    if not hevy_api_key or not openrouter_api_key:
+        st.warning("Please provide both API keys in the sidebar.")
+    elif not user_goal:
+        st.warning("Please provide a training goal so the AI knows what to optimize for.")
+    else:
+        with st.spinner("Fetching data from Hevy..."):
+            workout_data = fetch_and_clean_hevy_data(hevy_api_key, months_to_analyze)
+            
+        if workout_data:
+            st.success(f"Successfully loaded {len(workout_data)} workouts from the last {months_to_analyze} months.")
+            
+            with st.spinner("Analyzing your programming..."):
+                # Configure OpenAI client to point to OpenRouter
+                client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=openrouter_api_key, # (You can rename this variable in your UI later, but paste your OpenRouter key here)
+                )
+                
+                # Construct the System Prompt
+                prompt = f"""
+                You are an elite strength and conditioning coach. 
+                The user's primary goal is: {user_goal}
+                
+                Below is their parsed workout data for the last {months_to_analyze} months. 
+                Analyze their frequency, exercise selection, and progressive overload.
+                
+                Provide:
+                1. A summary of what they are doing well.
+                2. Identification of any plateaus or volume imbalances.
+                3. 3 specific, actionable changes to their routine to hit their goal.
+                
+                Data:
+                {workout_data}
+                """
+                
+                # Call the OpenRouter Free Model Router
+                response = client.chat.completions.create(
+                    model="openrouter/free",
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                st.markdown("---")
+                st.markdown("### Coach's Analysis")
+                st.write(response.choices[0].message.content)
