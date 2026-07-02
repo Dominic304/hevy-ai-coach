@@ -15,9 +15,13 @@ with st.sidebar:
     hevy_api_key = st.text_input("Hevy API Key", type="password", help="Get this from hevy.com/settings?developer")
     openrouter_api_key = st.text_input("OpenRouter / AI API Key", type="password")
     months_to_analyze = st.slider("Months of Data to Analyze", 1, 24, 3)
-    user_goal = st.text_area("What is your current main goal? (e.g., Hypertrophy, fix bench plateau)")
+    user_goal = st.text_area("What is your current main goal? (e.g., Hypertrophy, fix bench plateau)",value="Hypertrophy", height=100)
 
-    st.header("🤖 Customize Coach Prompt")
+
+
+    to_graph = st.checkbox("Graph my training metrics", value=True)
+
+    st.header("Customize Coach Prompt")
     # This text area loads the default base prompt, but allows you to completely edit it live
     custom_system_prompt = st.text_area(
         "Edit Coach Rules:",
@@ -104,8 +108,8 @@ def fetch_and_clean_hevy_data(api_key, months):
             break
             
         page += 1
-        
     return all_workouts
+    
 
 # --- 4.Feeding data to AI---
 if st.button("Analyze My Training", type="primary"):
@@ -116,45 +120,48 @@ if st.button("Analyze My Training", type="primary"):
     else:
         with st.spinner("Fetching data from Hevy..."):
             workout_data = fetch_and_clean_hevy_data(hevy_api_key, months_to_analyze)
-            
+        st.success(f"Successfully loaded {len(workout_data)} workouts from the last {months_to_analyze} months.")
         if workout_data:
-            st.success(f"Successfully loaded {len(workout_data)} workouts from the last {months_to_analyze} months.")
+            
             
             # --- 5. Data visualization engine ---
-            st.markdown("## 📊 Your Training Metrics")
-            
-            # Flatten the nested workout details into a list for pandas calculation
-            chart_records = []
-            for w in workout_data:
-                total_workout_volume = 0
-                for ex in w["exercises"]:
-                    for s in ex["sets"]:
-                        # Safely fallback to 0 if Hevy returns null for bodyweight exercises
-                        weight = s.get("weight") or 0
-                        reps = s.get("reps") or 0
-                        total_workout_volume += (weight * reps)
+            if to_graph:
+             
+             st.markdown("##Your Training Metrics")
+             
+             # Flatten the nested workout details into a list for pandas calculation
+             chart_records = []
+             for w in workout_data:
+                 total_workout_volume = 0
+                 for ex in w["exercises"]:
+                     for s in ex["sets"]:
+                         # Safely fallback to 0 if Hevy returns null for bodyweight exercises
+                         weight = s.get("weight") or 0
+                         reps = s.get("reps") or 0
+                         total_workout_volume += (weight * reps)
+                 
+                 chart_records.append({
+                     "Date": pd.to_datetime(w["date"]),
+                     "Volume (kg)": total_workout_volume,
+                     "Workouts": 1
+                 })
+             
+             df = pd.DataFrame(chart_records)
+             
+             if not df.empty:
+                 col1, col2 = st.columns(2)
+                 
+                 with col1:
+                     st.subheader("Total Session Volume Over Time")
+                     df_sorted = df.sort_values("Date")
+                     st.line_chart(data=df_sorted, x="Date", y="Volume (kg)")
+                     
+                 with col2:
+                     st.subheader("Workout Frequency (Weekly Count)")
+                     df_weekly = df.resample('W', on='Date').sum().reset_index()
+                     st.bar_chart(data=df_weekly, x="Date", y="Workouts")
                 
-                chart_records.append({
-                    "Date": pd.to_datetime(w["date"]),
-                    "Volume (kg)": total_workout_volume,
-                    "Workouts": 1
-                })
-            
-            df = pd.DataFrame(chart_records)
-            
-            if not df.empty:
-                col1, col2 = st.columns(2)
                 
-                with col1:
-                    st.subheader("Total Session Volume Over Time")
-                    df_sorted = df.sort_values("Date")
-                    st.line_chart(data=df_sorted, x="Date", y="Volume (kg)")
-                    
-                with col2:
-                    st.subheader("Workout Frequency (Weekly Count)")
-                    df_weekly = df.resample('W', on='Date').sum().reset_index()
-                    st.bar_chart(data=df_weekly, x="Date", y="Workouts")
-            
             # --- 6. AI Analysis Engine ---
             with st.spinner("Analyzing your programming..."):
                 # Configure OpenAI client to point to OpenRouter
