@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from openai import OpenAI
+import csv
 
 # ---------------------Page config-----------------------
 st.set_page_config(page_title="Hevy AI Coach", layout="wide")
@@ -16,7 +17,7 @@ with st.sidebar:
     openrouter_api_key = st.text_input("OpenRouter / AI API Key", type="password")
     months_to_analyze = st.slider("Months of Data to Analyze", 1, 24, 3)
     user_goal = st.text_area("What is your current main goal? (e.g., Hypertrophy, fix bench plateau)", value="Hypertrophy", height=100)
-    
+    to_analyze = st.checkbox("Analyze my training metrics", value=True)
     to_graph = st.checkbox("Graph my training metrics", value=True)
 
     st.header("Customize Coach Prompt")
@@ -33,7 +34,6 @@ with st.sidebar:
 
 # ----------------------Data parsing---------------------------
 def fetch_and_clean_hevy_data(api_key, months):
-    """Fetches paginated workouts from Hevy and strips out unnecessary metadata."""
     headers = {"api-key": api_key.strip()}
     base_url = "https://api.hevyapp.com/v1/workouts"
     cutoff_date = datetime.now() - timedelta(days=30 * months)
@@ -95,7 +95,23 @@ def fetch_and_clean_hevy_data(api_key, months):
             break
             
         page += 1
+    with open("exercise_data.csv", "w", newline="") as csvfile:
+        fieldnames = ["date", "name", "exercise_title", "set_weight", "set_reps"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for workout in all_workouts:
+            for exercise in workout["exercises"]:
+                for s in exercise["sets"]:
+                    writer.writerow({
+                        "date": workout["date"],
+                        "name": workout["name"],
+                        "exercise_title": exercise["title"],
+                        "set_weight": s["weight"],
+                        "set_reps": s["reps"]
+                    })
     return all_workouts
+
+
 
 # ---------------------------------- STREAMLIT MEMORY  ------------------------------------
 if "workout_data" not in st.session_state:
@@ -105,35 +121,36 @@ if "ai_analysis" not in st.session_state:
 
 
 # ---------------------------------- Execution Flow ---------------------------------------
-if st.button("Analyze My Training", type="primary"):
-    if not hevy_api_key or not openrouter_api_key:
-        st.warning("Please provide both API keys in the sidebar.")
-    elif not user_goal:
-        st.warning("Please provide a training goal so the AI knows what to optimize for.")
-    else:
-        with st.spinner("Fetching data from Hevy..."):
-            st.session_state.workout_data = fetch_and_clean_hevy_data(hevy_api_key, months_to_analyze)
-        
-        if st.session_state.workout_data:
-            with st.spinner("AI is analyzing your metrics..."):
-                client = OpenAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=openrouter_api_key,
-                )
-                
-                full_prompt = f"""
-                User's Primary Training Goal: {user_goal}
-                Coach Analysis Guidelines:
-                {custom_system_prompt}
-                Data:
-                {st.session_state.workout_data}
-                """
-                response = client.chat.completions.create(
-                    model="openrouter/free",
-                    messages=[{"role": "user", "content": full_prompt}]
-                )
-                st.session_state.ai_analysis = response.choices[0].message.content
-
+if to_analyze:
+ if st.button("Analyze My Training", type="primary"):
+     if not hevy_api_key or not openrouter_api_key:
+         st.warning("Please provide both API keys in the sidebar.")
+     elif not user_goal:
+         st.warning("Please provide a training goal so the AI knows what to optimize for.")
+     else:
+         with st.spinner("Fetching data from Hevy..."):
+             st.session_state.workout_data = fetch_and_clean_hevy_data(hevy_api_key, months_to_analyze)
+         
+         if st.session_state.workout_data:
+             with st.spinner("AI is analyzing your metrics..."):
+                 client = OpenAI(
+                     base_url="https://openrouter.ai/api/v1",
+                     api_key=openrouter_api_key,
+                 )
+                 
+                 full_prompt = f"""
+                 User's Primary Training Goal: {user_goal}
+                 Coach Analysis Guidelines:
+                 {custom_system_prompt}
+                 Data:
+                 {st.session_state.workout_data}
+                 """
+                 response = client.chat.completions.create(
+                     model="openrouter/free",
+                     messages=[{"role": "user", "content": full_prompt}]
+                 )
+                 st.session_state.ai_analysis = response.choices[0].message.content
+ 
 
 # --------------------------------------- RENDER UI ------------------------------------
 if st.session_state.workout_data:
