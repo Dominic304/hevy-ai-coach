@@ -4,19 +4,49 @@ import pandas as pd
 from datetime import datetime, timedelta
 from openai import OpenAI
 import csv
+import anthropic
+from google import genai
 
-# ---------------------Page config-----------------------
+# --------------------- LLM Key Detector ---------------------
+def identify_and_verify_llm_key(api_key: str) -> str:
+    
+    api_key = api_key.strip()
+    
+    if api_key.startswith("sk-ant-"):
+        return "Anthropic"
+    elif api_key.startswith("sk-proj-") or (api_key.startswith("sk-") and not api_key.startswith("sk-or-")):
+        return "OpenAI"
+    elif api_key.startswith("AIza"):
+        return "Google Gemini"
+    elif api_key.startswith("sk-or-"):
+        return "OpenRouter"
+
+    # Deep Network Verification Fallback
+    try:
+        res = requests.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=2)
+        if res.status_code == 200: return "OpenAI"
+    except: pass
+
+    try:
+        res = requests.get("https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {api_key}"}, timeout=2)
+        if res.status_code == 200: return "OpenRouter"
+    except: pass
+
+    return "Unknown Provider"
+
+# --------------------- Page config -----------------------
 st.set_page_config(page_title="Hevy AI Coach", layout="wide")
 st.title("Hevy AI Workout Analyzer & Visualizer")
 st.write("Provide your API keys and fetch your data to get personalized programming advice.")
 
-# ----------------------User interface------------------------
+# ---------------------- User interface ------------------------
 with st.sidebar:
     st.header("Configuration")
     hevy_api_key = st.text_input("Hevy API Key", type="password", help="Get this from hevy.com/settings?developer")
-    openrouter_api_key = st.text_input("OpenRouter / AI API Key", type="password")
+    ai_api_key = st.text_input("AI API Key", type="password")
     months_to_analyze = st.slider("Months of Data to Analyze", 1, 24, 3)
     user_goal = st.text_area("What is your current main goal? (e.g., Hypertrophy, fix bench plateau)", value="Hypertrophy", height=100)
+    
     to_analyze = st.checkbox("Analyze my training metrics", value=True)
     to_graph = st.checkbox("Graph my training metrics", value=True)
 
@@ -25,14 +55,15 @@ with st.sidebar:
         "Edit Coach Rules:",
         value=(
             "You are an elite strength and conditioning coach.\n"
-            "Analyze the following workout history. Identify volume imbalances, "
-            "track progressive overload consistency, and provide exactly 3 specific, "
+            "Analyze the following workout history, the workouts are grouped by date and time, if an exercise has the same date and time it means."
+            "it was performed in the same session. Each exercise has sets with weight and reps."
+            "Identify volume imbalances, track progressive overload consistency, and provide exactly 3 specific,"
             "actionable programming modifications tailored to the user's goals."
         ),
         height=150
     )
 
-# ----------------------Data parsing---------------------------
+# ---------------------- Data parsing ---------------------------
 def fetch_and_clean_hevy_data(api_key, months):
     headers = {"api-key": api_key.strip()}
     base_url = "https://api.hevyapp.com/v1/workouts"
@@ -73,6 +104,7 @@ def fetch_and_clean_hevy_data(api_key, months):
                 
             cleaned_workout = {
                 "date": workout_date.strftime("%Y-%m-%d"),
+                "time": workout_date.strftime("%H:%M:%S"), # Added exact start time
                 "name": workout.get("name", "Workout"),
                 "exercises": []
             }
@@ -95,73 +127,120 @@ def fetch_and_clean_hevy_data(api_key, months):
             break
             
         page += 1
-    with open("exercise_data.csv", "w", newline="") as csvfile:
-        fieldnames = ["date", "name", "exercise_title", "set_weight", "set_reps"]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for workout in all_workouts:
-            for exercise in workout["exercises"]:
-                for s in exercise["sets"]:
-                    writer.writerow({
-                        "date": workout["date"],
-                        "name": workout["name"],
-                        "exercise_title": exercise["title"],
-                        "set_weight": s["weight"],
-                        "set_reps": s["reps"]
-                    })
+        
+    # Write to CSV including the new time data
+    if all_workouts:
+        with open("exercise_data.csv", "w", newline="", encoding="utf-8") as csvfile:
+            fieldnames = ["date", "time", "name", "exercise_title", "set_weight", "set_reps"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for workout in all_workouts:
+                for exercise in workout["exercises"]:
+                    for s in exercise["sets"]:
+                        writer.writerow({
+                            "date": workout["date"],
+                            "time": workout["time"],
+                            "name": workout["name"],
+                            "exercise_title": exercise["title"],
+                            "set_weight": s["weight"],
+                            "set_reps": s["reps"]
+                        })
     return all_workouts
 
 
-
-# ---------------------------------- STREAMLIT MEMORY  ------------------------------------
+# ---------------------------------- STREAMLIT MEMORY ------------------------------------
 if "workout_data" not in st.session_state:
     st.session_state.workout_data = None
 if "ai_analysis" not in st.session_state:
     st.session_state.ai_analysis = None
+if "ai_provider" not in st.session_state:
+    st.session_state.ai_provider = None
 
 
 # ---------------------------------- Execution Flow ---------------------------------------
-if to_analyze:
- if st.button("Analyze My Training", type="primary"):
-     if not hevy_api_key or not openrouter_api_key:
-         st.warning("Please provide both API keys in the sidebar.")
-     elif not user_goal:
-         st.warning("Please provide a training goal so the AI knows what to optimize for.")
-     else:
-         with st.spinner("Fetching data from Hevy..."):
-             st.session_state.workout_data = fetch_and_clean_hevy_data(hevy_api_key, months_to_analyze)
-         
-         if st.session_state.workout_data:
-             with st.spinner("AI is analyzing your metrics..."):
-                 client = OpenAI(
-                     base_url="https://openrouter.ai/api/v1",
-                     api_key=openrouter_api_key,
-                 )
-                 
-                 full_prompt = f"""
-                 User's Primary Training Goal: {user_goal}
-                 Coach Analysis Guidelines:
-                 {custom_system_prompt}
-                 Data:
-                 {st.session_state.workout_data}
-                 """
-                 response = client.chat.completions.create(
-                     model="openrouter/free",
-                     messages=[{"role": "user", "content": full_prompt}]
-                 )
-                 st.session_state.ai_analysis = response.choices[0].message.content
- 
+if st.button("Analyze My Training", type="primary"):
+    if not hevy_api_key:
+        st.warning("Please provide your Hevy API key.")
+    elif to_analyze and not ai_api_key:
+        st.warning("Please provide your AI API key to generate an analysis.")
+    elif to_analyze and not user_goal:
+        st.warning("Please provide a training goal so the AI knows what to optimize for.")
+    else:
+        # Step 1: Fetch Data
+        with st.spinner("Fetching data from Hevy..."):
+            st.session_state.workout_data = fetch_and_clean_hevy_data(hevy_api_key, months_to_analyze)
+
+        # Step 2: AI Analysis (Only runs once when button is clicked)
+        if st.session_state.workout_data and to_analyze:
+            with st.spinner("Identifying API and analyzing metrics..."):
+                provider = identify_and_verify_llm_key(ai_api_key)
+                st.session_state.ai_provider = provider
+                
+                # Dynamically set API URL and Model based on detected key
+                if provider == "OpenAI":
+                    client = OpenAI(api_key=ai_api_key.strip())
+                    selected_model = "gpt-4o-mini"
+                elif provider == "OpenRouter":
+                    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=ai_api_key.strip())
+                    selected_model = "openrouter/free"
+                elif provider == "Anthropic":
+                    client = anthropic.Client(api_key=ai_api_key.strip())
+                    selected_model = "claude-v1"
+                elif provider == "Google Gemini":
+                    client = genai.Client(api_key=ai_api_key.strip())
+                    selected_model = "gemini-1.5"
+                else:
+                    st.warning(f"Detected {provider} key. This code uses the standard OpenAI library. Attempting connection, but it may fail.")
+                    client = OpenAI(api_key=ai_api_key.strip())
+                    selected_model = "gpt-3.5-turbo"
+                
+                full_prompt = f"""
+                User's Primary Training Goal: {user_goal}
+                Coach Analysis Guidelines:
+                {custom_system_prompt}
+                Data:
+                {st.session_state.workout_data}
+                """
+                
+                try:
+                    response = client.chat.completions.create(
+                        model=selected_model,
+                        messages=[{"role": "user", "content": full_prompt}]
+                    )
+                    st.session_state.ai_analysis = response.choices[0].message.content
+                except Exception as e:
+                    st.session_state.ai_analysis = f"API Error: {str(e)}"
 
 # --------------------------------------- RENDER UI ------------------------------------
 if st.session_state.workout_data:
     st.success(f"Successfully loaded {len(st.session_state.workout_data)} workouts from the last {months_to_analyze} months.")
     
-    st.markdown("Coach's Analysis")
-    st.write(st.session_state.ai_analysis)
+    # --- NEW: Download CSV Button ---
+    try:
+        with open("exercise_data.csv", "rb") as file:
+            st.download_button(
+                label="Download Data as CSV",
+                data=file,
+                file_name="my_hevy_workouts.csv",
+                mime="text/csv",
+            )
+    except FileNotFoundError:
+        st.error("CSV file not found. Try analyzing your training again.")
+    # --------------------------------
     
+    if st.session_state.ai_provider:
+        st.info(f"API Connected via: {st.session_state.ai_provider}")
+    
+    # Render AI Analysis
+    if to_analyze and st.session_state.ai_analysis:
+        st.markdown("---")
+        st.markdown("## Coach's Analysis")
+        st.write(st.session_state.ai_analysis)
+
+    # Render Charts
     if to_graph:
         st.markdown("---")
-        st.markdown("Exercise Progress Charts")
+        st.markdown("## Exercise Progress Charts")
         st.write("Track your progressive overload over time.")
         
         exercise_records = []
@@ -185,14 +264,10 @@ if st.session_state.workout_data:
             unique_exercises = sorted(df_ex["Exercise"].unique())
             selected_ex = st.selectbox("Select an exercise to view your strength progress:", unique_exercises)
             
-            # Filter for the selected exercise
             df_filtered = df_ex[df_ex["Exercise"] == selected_ex]
-            
-            #Group by date 
             df_filtered = df_filtered.groupby("Date")["Max Weight (kg)"].max().reset_index()
             df_filtered = df_filtered.sort_values("Date")
             
-            #Handle single data point vs multiple data points
             if len(df_filtered) == 1:
                 st.info(f"You have only logged '{selected_ex}' on one day during this timeframe. Keep training it to see a trend line!")
                 st.scatter_chart(data=df_filtered, x="Date", y="Max Weight (kg)")
